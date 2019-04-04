@@ -7,6 +7,14 @@ const themeChangeButton = document.createElement('button');
 themeChangeButton.innerHTML = DAY_MODE_TEXT;
 themeChangeButton.className = 'themeButton';
 
+enum Theme {
+  LIGHT,
+  DARK,
+}
+
+let targetTheme: Theme = Theme.LIGHT;
+let currentTheme: Theme = Theme.LIGHT;
+
 themeChangeButton.onclick = () => {
   if (targetTheme === Theme.LIGHT) {
     targetTheme = Theme.DARK;
@@ -15,12 +23,20 @@ themeChangeButton.onclick = () => {
     targetTheme = Theme.LIGHT;
     themeChangeButton.innerHTML = DAY_MODE_TEXT;
   }
+
+  for (let i = 0; i < globalCharts.length; i++) {
+    const ch = globalCharts[i];
+    setAnimationTimer(ch, RedrawablePart.PREVIEW);
+    setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
+    setAnimationTimer(ch, RedrawablePart.BUTTONS);
+    setAnimationTimer(ch, RedrawablePart.MARK);
+  }
 }
 
 document.body.appendChild(themeChangeButton);
 
 
-let canvas: HTMLCanvasElement = null;
+
 
 type Color = {
   r: number;
@@ -33,18 +49,25 @@ enum ColorId {
   LEGEND_TEXT,
 }
 
-enum Theme {
-  LIGHT,
-  DARK,
-}
+
 
 type ThemedColor = {
   light: Color;
   dark: Color;
 }
 
-let targetTheme: Theme = Theme.LIGHT;
-let currentTheme: number = Theme.LIGHT;
+const DIVIDE_X_BY = 0.00001;
+const PREVIEW_MIN_DISTANCE = 0.1;
+enum DragState {
+  NONE,
+  LEFT,
+  RIGHT,
+  CENTER,
+}
+
+
+
+
 const themeColors: ThemedColor[] = [];
 
 function parseHex(hexColor: string) {
@@ -90,15 +113,15 @@ function getLerpedColor(col: ColorId) {
   return textColor;
 }
 
-function setStroke(col: ColorId) {
+function setStroke(ctx: CanvasRenderingContext2D, col: ColorId) {
   ctx.strokeStyle = getLerpedColor(col);
 }
 
-function setFill(col: ColorId) {
+function setFill(ctx: CanvasRenderingContext2D, col: ColorId) {
   ctx.fillStyle = getLerpedColor(col);
 }
 
-function roundedRect(x: number, y: number, width: number, height: number, radius: number) {
+function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   ctx.moveTo(x + radius, y);
   ctx.lineTo(x + width - radius, y);
   ctx.arc(x + width - radius, y + radius, radius, 1.5 * Math.PI, 2 * Math.PI);
@@ -110,76 +133,28 @@ function roundedRect(x: number, y: number, width: number, height: number, radius
   ctx.arc(x + radius, y + radius, radius, Math.PI, 1.5 * Math.PI);
 }
 
-function createCanvas(ch: ChartData) {
-  if (canvas) {
-    canvas.parentElement.removeChild(canvas);
-  }
+const dpr = window.devicePixelRatio;
 
-  canvas = document.createElement('canvas');
-  document.body.appendChild(canvas);
-  ctx = canvas.getContext('2d');
-  canvas.style.width = '100%';
-  canvas.style.height = '1500px';
-  handleResize();
+function handleResize(ch: ChartData) {
+  const rect = ch.middleCanvas.getBoundingClientRect();
+  ch.middleCanvas.width = rect.width * dpr;
+  ch.middleCanvas.height = rect.height * dpr;
+  ch.backgroundCanvas.width = rect.width * dpr;
+  ch.backgroundCanvas.height = rect.height * dpr;
+  ch.foregroundCanvas.width = rect.width * dpr;
+  ch.foregroundCanvas.height = rect.height * dpr;
 
-  canvas.ontouchmove = e => {
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = e.touches[0].clientX - rect.left;
-    mouse.y = e.touches[0].clientY - rect.top;
-  }
-  canvas.ontouchstart = e => {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = e.touches[0].clientX - rect.left;
-    mouse.y = e.touches[0].clientY - rect.top;
-    if (!mouse.left.isDown) {
-      mouse.left.wentDown = true;
-    }
-    mouse.left.isDown = true;
-  }
-  canvas.ontouchend = e => {
-    if (mouse.left.isDown) {
-      mouse.left.wentUp = true;
-    }
-    mouse.left.isDown = false;
-  }
-  canvas.onmousedown = e => {
-    if (e.button === 0) {
-      if (!mouse.left.isDown) {
-        mouse.left.wentUp = true;
-      }
-      mouse.left.isDown = true;
-    }
-  }
-  canvas.onmouseup = e => {
-    if (e.button === 0) {
-      if (mouse.left.isDown) {
-        mouse.left.wentUp = true;
-      }
-      mouse.left.isDown = false;
-    }
-  }
-  canvas.onmousemove = e => {
-    mouse.x = e.clientX - canvas.clientLeft;
-    mouse.y = e.clientY - canvas.clientTop;
-  }
+  ch._maxAnimationTimer = [15, 15, 15, 15];
+}
 
-  ctx = canvas.getContext('2d');
-
-  handleResize();
+window.onresize = () => {
+  for (let ch of globalCharts) {
+    handleResize(ch);
+  }
 }
 
 
-function handleResize() {
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = rect.width;
-  canvas.height = rect.height;
-}
 
-window.onresize = handleResize;
-
-
-let ctx: CanvasRenderingContext2D;
 
 type ChartData = {
   x: Uint32Array;
@@ -192,6 +167,26 @@ type ChartData = {
   alpha: number[];
 
   buttonProgress: number[];
+
+  middleCanvas: HTMLCanvasElement;
+  backgroundCanvas: HTMLCanvasElement;
+  foregroundCanvas: HTMLCanvasElement;
+  bg: CanvasRenderingContext2D;
+  md: CanvasRenderingContext2D;
+  fg: CanvasRenderingContext2D;
+  globalFramesWithSameTargetCounter: number;
+  dragState: DragState;
+  dragOffsetPercent: number;
+  previewStart: number;
+  previewEnd: number;
+  targetPreviewStart: number;
+  targetPreviewEnd: number;
+  mainChartAnim: AnimationState;
+  previewAnim: AnimationState;
+  markIndex: number;
+  markAlpha: number;
+  _maxAnimationTimer: number[];
+  mouse: Mouse;
 }
 
 function getCx(x: number, minX: number, maxX: number, chartWidth: number) {
@@ -250,11 +245,11 @@ function getTextFromY(lineValue: number) {
   return lineText;
 }
 
-function drawChartLines(targetMaxY: number, currentMaxY: number, height: number, alpha: number = 1) {
+function drawChartLines(ch: ChartData, ctx: CanvasRenderingContext2D, targetMaxY: number, currentMaxY: number, height: number, alpha: number = 1) {
   const step = getStep(targetMaxY);
   ctx.save();
   ctx.beginPath();
-  setStroke(HORIZONTAL_LINE_COLOR);
+  setStroke(ctx, HORIZONTAL_LINE_COLOR);
   ctx.lineWidth = 2;
   ctx.globalAlpha = alpha;
   for (let lineIndex = 0; lineIndex < LINE_COUNT; lineIndex++) {
@@ -262,9 +257,9 @@ function drawChartLines(targetMaxY: number, currentMaxY: number, height: number,
 
     const lineY = height - lineValue / currentMaxY * height;
     ctx.moveTo(PREVIEW_PADDING_X, lineY);
-    ctx.lineTo(canvas.width - PREVIEW_PADDING_X, lineY);
+    ctx.lineTo(ch.middleCanvas.width - PREVIEW_PADDING_X, lineY);
 
-    setFill(TEXT_COLOR);
+    setFill(ch.md, TEXT_COLOR);
 
     const lineText = getTextFromY(lineValue);
     ctx.fillText(lineText, PREVIEW_PADDING_X, lineY - 20);
@@ -277,7 +272,6 @@ function peek<T>(arr: T[]) {
   return arr[arr.length - 1];
 }
 
-let globalFramesWithSameTargetCounter = 0;
 
 const WEEK_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -287,8 +281,10 @@ function constrain(a: number, min: number, max: number) {
   return result;
 }
 
+let globalFrameIndex = 0;
 
 function drawChart(
+  ctx: CanvasRenderingContext2D,
   ch: ChartData, pX: number, pY: number,
   chartWidth: number, chartHeight: number, startPercent: number, endPercent: number,
   anim: AnimationState, drawLines: boolean
@@ -309,10 +305,12 @@ function drawChart(
   let startX = startPercent * distX + ch.x[0];
   let endX = endPercent * distX + ch.x[0];
 
+
   if (drawLines) {
-    beginTimer('vert_lines')
+    ctx.clearRect(pX, drawLines ? 0 : pY, chartWidth, chartHeight + (drawLines ? 50 : 0));
+    ctx.font = '20px Verdana, sans-serif';
     firstLine.alpha = Math.min(firstLine.alpha + ALPHA_CHANGE_RATE, 1);
-    drawChartLines(firstLine.target * ch.maxY, anim.current * ch.maxY, chartHeight, firstLine.alpha);
+    drawChartLines(ch, ctx, firstLine.target * ch.maxY, anim.current * ch.maxY, chartHeight, firstLine.alpha);
 
     for (let animIndex = 1; animIndex < anim.vertLines.length; animIndex++) {
       const line = anim.vertLines[animIndex];
@@ -320,62 +318,44 @@ function drawChart(
       if (line.alpha <= ALPHA_CHANGE_RATE) {
         anim.vertLines.splice(animIndex, 1);
       }
-      drawChartLines(line.target * ch.maxY, anim.current * ch.maxY, chartHeight, line.alpha);
+      drawChartLines(ch, ctx, line.target * ch.maxY, anim.current * ch.maxY, chartHeight, line.alpha);
     }
-    endTimer('vert_lines')
 
+    const xsOnScreen = endIndex - startIndex;
+    const desiredInterval = xsOnScreen / 7;
+    const pow2 = Math.max(Math.ceil(Math.log2(desiredInterval)), 0);
 
-    {
-      beginTimer('hor_lines')
+    let startXIndex = startIndex - 1;
+    let endXIndex = endIndex + 1;
+    startXIndex = startXIndex;
 
-      const xsOnScreen = endIndex - startIndex;
-      const desiredInterval = xsOnScreen / 7;
-      const pow2 = Math.max(Math.ceil(Math.log2(desiredInterval)), 0);
-      const incr = 2 ** pow2;
+    for (let p = 0; p <= 10; p++) {
+      const alpha = anim.horLines[p];
 
+      const alphaChange = p < pow2 ? -0.1 : 0.1
+      anim.horLines[p] = constrain(alpha + alphaChange, 0, 1);
 
-      let startXIndex = startIndex - 1;
-      let endXIndex = endIndex + 1;
-      startXIndex = startXIndex;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      for (let xIndex = 2 ** p; xIndex <= endXIndex; xIndex += 2 ** (p + 1)) {
+        setFill(ch.md, TEXT_COLOR);
+        const date = new Date(ch.x[xIndex] / DIVIDE_X_BY);
+        const text = `${MONTHS[date.getMonth()]} ${date.getUTCDate()}`;
 
-      for (let p = 0; p <= 10; p++) {
-        const alpha = anim.horLines[p];
-
-        const alphaChange = p < pow2 ? -0.1 : 0.1
-        anim.horLines[p] = constrain(alpha + alphaChange, 0, 1);
-
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        for (let xIndex = 2 ** p; xIndex <= endXIndex; xIndex += 2 ** (p + 1)) {
-          setFill(TEXT_COLOR);
-          const date = new Date(ch.x[xIndex] / DIVIDE_X_BY);
-          const text = `${MONTHS[date.getMonth()]} ${date.getUTCDate()}`;
-
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.fillText(text, getCx(ch.x[xIndex], startX, endX, chartWidth), MAIN_CHART_HEIGHT + 10);
-        }
-        ctx.restore();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(text, getCx(ch.x[xIndex], startX, endX, chartWidth), MAIN_CHART_HEIGHT + 10);
       }
-
-      anim.oldPow2 = pow2;
-
-      endTimer('hor_lines')
+      ctx.restore();
     }
+
+    anim.oldPow2 = pow2;
   }
 
-  if (drawLines) {
-    beginTimer('graph')
-  } else {
-    beginTimer('preview_graph')
-  }
   for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
     const enabled = ch.enabled[lineIndex];
-    if (enabled) {
-      ch.alpha[lineIndex] = constrain(ch.alpha[lineIndex] + 0.03, 0, 1);
-    } else {
-      ch.alpha[lineIndex] = constrain(ch.alpha[lineIndex] - 0.03, 0, 1);
-    }
+    const alphaChange = enabled ? 0.05 : -0.05;
+    ch.alpha[lineIndex] = constrain(ch.alpha[lineIndex] + alphaChange, 0, 1);
     const alpha = ch.alpha[lineIndex];
 
     ctx.save();
@@ -415,88 +395,6 @@ function drawChart(
     ctx.stroke();
     ctx.restore();
   }
-  if (drawLines) {
-    endTimer('graph')
-  } else {
-    endTimer('preview_graph')
-  }
-
-  if (drawLines) {
-    beginTimer('mark')
-
-    if (markAlpha > 0) {
-      const markScreenX = getCx(ch.x[markIndex], startX, endX, chartWidth) + pX;
-
-      ctx.save();
-      ctx.globalAlpha = markAlpha;
-      ctx.beginPath();
-      ctx.lineWidth = 3;
-      setStroke(VERTICAL_LINE_COLOR);
-      ctx.moveTo(markScreenX, pY);
-      ctx.lineTo(markScreenX, chartHeight);
-      ctx.stroke();
-
-
-      for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
-        const y = ch.y[lineIndex];
-
-        const markScreenY = getCy(y[markIndex], maxY, chartHeight) + pY;
-        ctx.beginPath();
-
-        setFill(BACKGROUND_COLOR);
-        ctx.strokeStyle = ch.color[lineIndex];
-        ctx.lineWidth = 3;
-        ctx.arc(markScreenX, markScreenY, 10, 0, 2 * Math.PI);
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      const TEXT_WIDTH = 130;
-      const RECT_PADDING = 15;
-
-      ctx.beginPath();
-      setStroke(VERTICAL_LINE_COLOR);
-      const rectWidth = TEXT_WIDTH * ch.y.length + RECT_PADDING * 2;
-      const rectX = Math.min(Math.max(markScreenX - 70, 0), chartWidth - rectWidth);
-      const rectY = pY;
-
-      // {
-      //   ctx.save()
-      //   const shadow = ctx.createLinearGradient(0, 0, 0, 50);
-      //   shadow.addColorStop(0, 'black');
-      //   shadow.addColorStop(1, 'white');
-
-      //   ctx.fillStyle = shadow;
-      //   ctx.fillRect(rectX, rectY + 140, rectWidth, 50);
-      //   ctx.restore();
-      // }
-
-      roundedRect(rectX, rectY, rectWidth, 130, 10);
-      ctx.stroke();
-      setFill(BACKGROUND_COLOR);
-      ctx.fill();
-      ctx.textBaseline = 'top';
-
-      setFill(BUTTON_TEXT_COLOR)
-      const date = new Date(ch.x[markIndex] / DIVIDE_X_BY);
-      const text = `${WEEK_DAYS[date.getDay()]}, ${MONTHS[date.getMonth()]} ${date.getUTCDate()}`
-      ctx.fillText(text, rectX + RECT_PADDING, rectY + RECT_PADDING);
-
-      for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
-        ctx.font = 'bold 30px Verdana, sans-serif';
-        ctx.fillStyle = ch.color[lineIndex];
-        const text = getTextFromY(ch.y[lineIndex][markIndex]);
-        const lineX = rectX + RECT_PADDING + TEXT_WIDTH * lineIndex;
-        const lineY = rectY + 60;
-        ctx.fillText(text, lineX, lineY);
-
-        ctx.font = '23px Verdana, sans-serif';
-        ctx.fillText(ch.labels[lineIndex], lineX, lineY + 40);
-      }
-      ctx.restore();
-    }
-    endTimer('mark')
-  }
 
   const newTarget = targetMaxY / ch.maxY;
   const speed = anim.changeRate;
@@ -510,33 +408,105 @@ function drawChart(
   }
 
   if (anim.target === newTarget) {
-    globalFramesWithSameTargetCounter++;
+    ch.globalFramesWithSameTargetCounter++;
   } else {
     anim.target = newTarget;
     anim.changeRate = (newTarget - anim.current) / 10;
-    globalFramesWithSameTargetCounter = 0;
+    ch.globalFramesWithSameTargetCounter = 0;
   }
 
 
   if (anim.target !== firstLine.target) {
     const shouldAddLine = (globalFrameIndex % 10 === 0 ||
-      mouse.left.wentUp ||
-      globalFramesWithSameTargetCounter > 5);
+      ch.mouse.left.wentUp ||
+      ch.globalFramesWithSameTargetCounter > 5);
 
     if (shouldAddLine && getStep(ch.maxY * newTarget) !== getStep(ch.maxY * firstLine.target)) {
       anim.vertLines.unshift({
         target: anim.target,
         alpha: 0,
       });
+      setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
     }
   }
 }
 
-const DIVIDE_X_BY = 0.00001;
 
 function loadChart(data: any, index: number) {
   const chart = data[index];
   const pointCount = chart.columns[0].length - 1;
+
+  const backgroundCanvas = document.createElement('canvas');
+  const bg = backgroundCanvas.getContext('2d');
+
+  const middleCanvas = document.createElement('canvas');
+  const md = middleCanvas.getContext('2d');
+
+  const foregroundCanvas = document.createElement('canvas');
+  const fg = foregroundCanvas.getContext('2d');
+  foregroundCanvas.style.pointerEvents = 'none';
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'wrapper';
+  wrapper.style.position = 'relative';
+  wrapper.appendChild(backgroundCanvas)
+  wrapper.appendChild(middleCanvas);
+  wrapper.appendChild(foregroundCanvas);
+
+  document.body.appendChild(wrapper);
+
+
+  const mouse = {
+    left: {
+      isDown: false,
+      wentDown: false,
+      wentUp: false,
+    },
+    x: 0,
+    y: 0,
+  };
+
+  if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+    middleCanvas.ontouchmove = e => {
+      const rect = middleCanvas.getBoundingClientRect();
+      mouse.x = (e.touches[0].clientX - rect.left) * dpr;
+      mouse.y = (e.touches[0].clientY - rect.top) * dpr;
+    }
+    middleCanvas.ontouchstart = e => {
+      const rect = middleCanvas.getBoundingClientRect();
+      mouse.x = (e.touches[0].clientX - rect.left) * dpr;
+      mouse.y = (e.touches[0].clientY - rect.top) * dpr;
+      if (!mouse.left.isDown) {
+        mouse.left.wentDown = true;
+      }
+      mouse.left.isDown = true;
+    }
+    middleCanvas.ontouchend = e => {
+      mouse.left.wentUp = true;
+      mouse.left.isDown = false;
+    }
+  } else {
+    middleCanvas.onmousedown = e => {
+      const rect = middleCanvas.getBoundingClientRect();
+      mouse.x = (e.clientX - rect.left) * dpr;
+      mouse.y = (e.clientY - rect.top) * dpr;
+      if (e.button === 0) {
+        mouse.left.wentDown = true;
+        mouse.left.isDown = true;
+      }
+    }
+    middleCanvas.onmouseup = e => {
+      if (e.button === 0) {
+        mouse.left.wentUp = true;
+        mouse.left.isDown = false;
+      }
+    }
+    middleCanvas.onmousemove = e => {
+      const rect = middleCanvas.getBoundingClientRect();
+      mouse.x = (e.clientX - rect.left) * dpr;
+      mouse.y = (e.clientY - rect.top) * dpr;
+    }
+  }
 
   const ch: ChartData = {
     x: new Uint32Array(pointCount),
@@ -548,7 +518,54 @@ function loadChart(data: any, index: number) {
     enabled: [],
     alpha: [],
     buttonProgress: [],
+    middleCanvas,
+    backgroundCanvas,
+    foregroundCanvas,
+
+    bg,
+    md,
+    fg,
+    globalFramesWithSameTargetCounter: 0,
+    dragState: DragState.NONE,
+    dragOffsetPercent: 0,
+    previewStart: 0,
+    previewEnd: 0,
+    targetPreviewStart: 0,
+    targetPreviewEnd: 0 + PREVIEW_MIN_DISTANCE,
+    mainChartAnim: {
+      current: 1,
+      target: 1,
+      vertLines: [
+        {
+          target: 1,
+          alpha: 1,
+        }
+      ],
+      horLines: new Array(20).fill(0),
+      changeRate: 0,
+      oldPow2: 0,
+    },
+    previewAnim: {
+      current: 1,
+      target: 1,
+      vertLines: [
+        {
+          target: 1,
+          alpha: 1,
+        }
+      ],
+      horLines: [],
+      changeRate: 0,
+      oldPow2: 0,
+    },
+    markIndex: 0,
+    markAlpha: 0,
+    _maxAnimationTimer: [10, 10, 10, 10],
+    mouse,
   };
+
+  handleResize(ch);
+
 
   ch.x.set(chart.columns[0].slice(1).map((n: number) => (n as number) * DIVIDE_X_BY) as ArrayLike<number>);
 
@@ -575,16 +592,15 @@ function loadChart(data: any, index: number) {
 }
 
 
-const PREVIEW_PADDING_Y = 30;
 const PREVIEW_PADDING_X = 20;
 const PREVIEW_VIGNETTE_WIDTH = 10;
 const PREVIEW_VIGNETTE_HEIGHT = 2;
-const MAIN_CHART_HEIGHT = 800;
-const PREVIEW_Y = 880;
-const PREVIEW_HEIGHT = 100;
+const MAIN_CHART_HEIGHT = 600;
+const PREVIEW_Y = MAIN_CHART_HEIGHT + 70;
+const PREVIEW_HEIGHT = 70;
 
-function getPreviewWidth() {
-  const result = canvas.width - PREVIEW_PADDING_X * 2;
+function getPreviewWidth(ch: ChartData) {
+  const result = ch.middleCanvas.width - PREVIEW_PADDING_X * 2;
   return result;
 }
 
@@ -600,16 +616,6 @@ type Mouse = {
   y: number;
 }
 
-const mouse: Mouse = {
-  left: {
-    isDown: false,
-    wentDown: false,
-    wentUp: false,
-  },
-  x: 0,
-  y: 0,
-};
-
 function pointInsideRect(x: number, y: number, rX: number, rY: number, rWidth: number, rHeight: number) {
   const result = x > rX &&
     x < rX + rWidth &&
@@ -618,335 +624,344 @@ function pointInsideRect(x: number, y: number, rX: number, rY: number, rWidth: n
   return result;
 }
 
-enum DragState {
-  NONE,
-  LEFT,
-  RIGHT,
-  CENTER,
-}
-
-let dragState = DragState.NONE;
-let dragOffsetPercent = 0;
-
-const PREVIEW_MIN_DISTANCE = 0.1;
-let previewStart = 0;
-let previewEnd = 0;
-
-let targetPreviewStart = 0;
-let targetPreviewEnd = targetPreviewStart + PREVIEW_MIN_DISTANCE;
-
-
-
-const ch0 = loadChart(data, 0);
-
-createCanvas(ch0);
-
-
-const mainChartAnim: AnimationState = {
-  current: 1,
-  target: 1,
-  vertLines: [
-    {
-      target: 1,
-      alpha: 1,
-    }
-  ],
-  horLines: new Array(20).fill(0),
-  changeRate: 0,
-  oldPow2: 0,
-};
-
-
-const previewChangeRate: AnimationState = {
-  current: 1,
-  target: 1,
-  vertLines: [
-    {
-      target: 1,
-      alpha: 1,
-    }
-  ],
-  horLines: [],
-  changeRate: 0,
-  oldPow2: 0,
-};
 
 
 const LINE_COUNT = 6;
 
-type Timer = {
-  totalTime: number;
-  count: number;
-  lastTime: number;
+
+enum RedrawablePart {
+  MAIN_CHART,
+  PREVIEW,
+  BUTTONS,
+  MARK,
 }
 
-const timers: { [s: string]: Timer } = {};
-
-
-const enabledTimers: { [s: string]: boolean } = {
-  loop: true,
-  // preview: true,
-  // preview_graph: true,
-};
-
-
-function beginTimer(name: string) {
-  if (!timers[name]) {
-    timers[name] = {
-      totalTime: 0,
-      count: 0,
-      lastTime: 0,
-    }
-  }
-  const t = timers[name];
-  t.lastTime = performance.now();
+function setAnimationTimer(ch: ChartData, part: RedrawablePart) {
+  ch._maxAnimationTimer[part] = 15;
 }
 
-const LOGGING_ENABLED = true;
-function endTimer(name: string) {
-  const t = timers[name];
-  t.count++;
-  t.totalTime += performance.now() - t.lastTime;
-
-  if (t.count === 60) {
-    if (LOGGING_ENABLED && enabledTimers[name]) {
-      console.log(name, '-', (t.totalTime / t.count).toFixed(3));
-    }
-    t.count = 0;
-    t.totalTime = 0;
-  }
+function shouldRedraw(ch: ChartData, part: RedrawablePart) {
+  return ch._maxAnimationTimer[part] >= 0;
 }
 
-let globalFrameIndex = 0;
-
-let markIndex = 0;
-let markAlpha = 0;
+function loop(ch: ChartData) {
+  const { bg, fg, md, middleCanvas } = ch;
 
 
-function loop() {
-  beginTimer('loop');
-
-  currentTheme = constrain(currentTheme + Math.sign(targetTheme - currentTheme) * 0.1, 0, 1);
-
-  ctx.font = '30px Verdana, sans-serif';
-
-  previewStart += (targetPreviewStart - previewStart) / 4;
-  previewEnd += (targetPreviewEnd - previewEnd) / 4;
-
-  setFill(BACKGROUND_COLOR);
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  beginTimer('main_chart');
-  drawChart(ch0, 0, 20, canvas.width, MAIN_CHART_HEIGHT, previewStart, previewEnd, mainChartAnim, true);
-  endTimer('main_chart');
+  currentTheme = constrain(currentTheme + Math.sign(targetTheme - currentTheme) * 0.02, 0, 1);
 
 
-  beginTimer('preview');
-  const previewWidth = getPreviewWidth();
+  ch.previewStart += (ch.targetPreviewStart - ch.previewStart) / 4;
+  ch.previewEnd += (ch.targetPreviewEnd - ch.previewEnd) / 4;
+
+  const previewWidth = getPreviewWidth(ch);
   const vignettePreviewWidth = previewWidth - PREVIEW_VIGNETTE_WIDTH;
-  const vignetteStartX = PREVIEW_PADDING_X + targetPreviewStart * vignettePreviewWidth;
-  const vignetteEndX = PREVIEW_PADDING_X + targetPreviewEnd * vignettePreviewWidth;
-
-  drawChart(ch0, PREVIEW_PADDING_X, PREVIEW_Y, previewWidth, PREVIEW_HEIGHT, 0, 1, previewChangeRate, false);
-  setFill(PREVIEW_BACKGROUND_COLOR);
-
-  ctx.fillRect(PREVIEW_PADDING_X, PREVIEW_Y, vignetteStartX - PREVIEW_PADDING_X, PREVIEW_HEIGHT);
-  ctx.fillRect(vignetteEndX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y, PREVIEW_PADDING_X + previewWidth - vignetteEndX - PREVIEW_VIGNETTE_WIDTH, PREVIEW_HEIGHT);
+  const vignetteStartX = PREVIEW_PADDING_X + ch.targetPreviewStart * vignettePreviewWidth;
+  const vignetteEndX = PREVIEW_PADDING_X + ch.targetPreviewEnd * vignettePreviewWidth;
 
 
+  for (let i = 0; i < ch._maxAnimationTimer.length; i++) {
+    ch._maxAnimationTimer[i]--;
+  }
+
+  if (shouldRedraw(ch, RedrawablePart.MAIN_CHART)) {
+    drawChart(md, ch, 0, 20, middleCanvas.width, MAIN_CHART_HEIGHT, ch.previewStart, ch.previewEnd, ch.mainChartAnim, true);
+  }
+
+  if (shouldRedraw(ch, RedrawablePart.MARK)) {
+    fg.clearRect(0, 0, middleCanvas.width, MAIN_CHART_HEIGHT);
+    if (ch.markAlpha > 0) {
+      const distX = ch.x[ch.count - 1] - ch.x[0];
+      const minX = ch.x[0] + distX * ch.previewStart;
+      const maxX = ch.x[0] + distX * ch.previewEnd;
+      const markScreenX = getCx(ch.x[ch.markIndex], minX, maxX, middleCanvas.width);
+
+      fg.save();
+      fg.globalAlpha = ch.markAlpha;
+      fg.beginPath();
+      fg.lineWidth = 3;
+      setStroke(fg, VERTICAL_LINE_COLOR);
+      fg.moveTo(markScreenX, 0);
+      fg.lineTo(markScreenX, MAIN_CHART_HEIGHT);
+      fg.stroke();
+
+      for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
+        const y = ch.y[lineIndex];
+
+        const maxY = ch.maxY * ch.mainChartAnim.current;
+        const markScreenY = getCy(y[ch.markIndex], maxY, MAIN_CHART_HEIGHT) + 20;
+        fg.beginPath();
+
+        setFill(fg, BACKGROUND_COLOR);
+        fg.strokeStyle = ch.color[lineIndex];
+        fg.lineWidth = 3;
+        fg.arc(markScreenX, markScreenY, 10, 0, 2 * Math.PI);
+        fg.fill();
+        fg.stroke();
+      }
+
+      const TEXT_WIDTH = 130;
+      const RECT_PADDING = 15;
+
+      fg.beginPath();
+      setStroke(fg, VERTICAL_LINE_COLOR);
+      const rectWidth = TEXT_WIDTH * ch.y.length + RECT_PADDING * 2;
+      const rectX = Math.min(Math.max(markScreenX - 70, 0), middleCanvas.width - rectWidth);
+      const rectY = 0;
+
+      roundedRect(fg, rectX, rectY, rectWidth, 130, 10);
+      fg.stroke();
+      setFill(fg, BACKGROUND_COLOR);
+      fg.fill();
+      fg.textBaseline = 'top';
+
+      setFill(fg, BUTTON_TEXT_COLOR)
+      const date = new Date(ch.x[ch.markIndex] / DIVIDE_X_BY);
+      const text = `${WEEK_DAYS[date.getDay()]}, ${MONTHS[date.getMonth()]} ${date.getUTCDate()}`
+      fg.font = '20px Verdana, sans-serif';
+      fg.fillText(text, rectX + RECT_PADDING, rectY + RECT_PADDING);
+
+      for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
+        fg.font = 'bold 20px Verdana, sans-serif';
+        fg.fillStyle = ch.color[lineIndex];
+        const text = getTextFromY(ch.y[lineIndex][ch.markIndex]);
+        const lineX = rectX + RECT_PADDING + TEXT_WIDTH * lineIndex;
+        const lineY = rectY + 60;
+        fg.fillText(text, lineX, lineY);
+
+        fg.font = '15px Verdana, sans-serif';
+        fg.fillText(ch.labels[lineIndex], lineX, lineY + 40);
+      }
+      fg.restore();
+    }
+  }
+
+  if (shouldRedraw(ch, RedrawablePart.PREVIEW)) {
+    setFill(bg, BACKGROUND_COLOR);
+    bg.fillRect(0, 0, middleCanvas.width, middleCanvas.height);
+    drawChart(bg, ch, PREVIEW_PADDING_X, PREVIEW_Y, previewWidth, PREVIEW_HEIGHT, 0, 1, ch.previewAnim, false);
+  }
 
 
+  if (shouldRedraw(ch, RedrawablePart.MAIN_CHART)) {
+    md.clearRect(0, PREVIEW_Y, middleCanvas.width, PREVIEW_HEIGHT);
+    setFill(md, PREVIEW_BACKGROUND_COLOR);
 
-  if (mouse.left.wentDown) {
-    if (pointInsideRect(
-      mouse.x, mouse.y,
+    md.fillRect(PREVIEW_PADDING_X, PREVIEW_Y, vignetteStartX - PREVIEW_PADDING_X, PREVIEW_HEIGHT);
+    md.fillRect(vignetteEndX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y, PREVIEW_PADDING_X + previewWidth - vignetteEndX - PREVIEW_VIGNETTE_WIDTH, PREVIEW_HEIGHT);
+
+    setFill(md, VIGNETTE_COLOR);
+
+    md.fillRect(
       vignetteStartX,
       PREVIEW_Y,
       PREVIEW_VIGNETTE_WIDTH,
       PREVIEW_HEIGHT,
-    )) {
-      dragState = DragState.LEFT;
-      dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - targetPreviewStart;
-    } else if (pointInsideRect(
-      mouse.x, mouse.y,
+    );
+
+    md.fillRect(
       vignetteEndX,
       PREVIEW_Y,
       PREVIEW_VIGNETTE_WIDTH,
       PREVIEW_HEIGHT,
+    );
+
+    md.fillRect(
+      vignetteStartX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y,
+      vignetteEndX - vignetteStartX - PREVIEW_VIGNETTE_WIDTH,
+      PREVIEW_VIGNETTE_HEIGHT,
+    );
+
+    md.fillRect(
+      vignetteStartX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y + PREVIEW_HEIGHT - PREVIEW_VIGNETTE_HEIGHT,
+      vignetteEndX - vignetteStartX - PREVIEW_VIGNETTE_WIDTH,
+      PREVIEW_VIGNETTE_HEIGHT,
+    );
+  }
+
+  const mouse = ch.mouse;
+
+  if (mouse.left.wentUp) {
+    ch.dragState = DragState.NONE;
+  }
+
+  if (mouse.left.wentDown) {
+    if (pointInsideRect(
+      mouse.x, mouse.y,
+      vignetteStartX - 10,
+      PREVIEW_Y,
+      PREVIEW_VIGNETTE_WIDTH + 30,
+      PREVIEW_HEIGHT,
     )) {
-      dragState = DragState.RIGHT;
-      dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - targetPreviewEnd;
-    } else if (pointInsideRect(
+      ch.dragState = DragState.LEFT;
+      ch.dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ch.targetPreviewStart;
+    }
+    if (pointInsideRect(
+      mouse.x, mouse.y,
+      vignetteEndX - 10,
+      PREVIEW_Y,
+      PREVIEW_VIGNETTE_WIDTH + 30,
+      PREVIEW_HEIGHT,
+    )) {
+      ch.dragState = DragState.RIGHT;
+      ch.dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ch.targetPreviewEnd;
+    }
+    if (pointInsideRect(
       mouse.x, mouse.y,
       vignetteStartX + PREVIEW_VIGNETTE_WIDTH,
       PREVIEW_Y,
       vignetteEndX - vignetteStartX - PREVIEW_VIGNETTE_WIDTH,
       PREVIEW_HEIGHT,
     )) {
-      dragState = DragState.CENTER;
-      dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ((targetPreviewEnd - targetPreviewStart) / 2 + targetPreviewStart);
+      ch.dragState = DragState.CENTER;
+      ch.dragOffsetPercent = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ((ch.targetPreviewEnd - ch.targetPreviewStart) / 2 + ch.targetPreviewStart);
     }
   }
-
 
   const MARK_ALPHA_SPEED = 0.1;
 
-  if (dragState === DragState.NONE && mouse.left.isDown) {
+  if (ch.dragState === DragState.NONE && mouse.left.isDown) {
     if (pointInsideRect(
       mouse.x, mouse.y,
-      0, 0, canvas.width, PREVIEW_Y,
+      0, 0, middleCanvas.width, PREVIEW_Y,
     )) {
-      const startIndexFloat = (ch0.count - 1) * targetPreviewStart;
-      const endIndexFloat = (ch0.count - 1) * targetPreviewEnd;
+      const startIndexFloat = (ch.count - 1) * ch.targetPreviewStart;
+      const endIndexFloat = (ch.count - 1) * ch.targetPreviewEnd;
 
       const mouseChartX = mouse.x;
-      const chartWidth = canvas.width;
+      const chartWidth = middleCanvas.width;
       const mouseChartRatioX = mouseChartX / chartWidth;
       const lerped = Math.round(lerp(startIndexFloat, endIndexFloat, mouseChartRatioX));
-      markIndex = Math.round(lerped);
+      ch.markIndex = Math.round(lerped);
 
-      if (markAlpha < 1)
-        markAlpha += MARK_ALPHA_SPEED;
+      setAnimationTimer(ch, RedrawablePart.MARK);
+      if (ch.markAlpha < 1) ch.markAlpha += MARK_ALPHA_SPEED;
     }
   } else {
-    if (markAlpha >= MARK_ALPHA_SPEED)
-      markAlpha -= MARK_ALPHA_SPEED;
-    else
-      markAlpha = 0;
+    if (ch.markAlpha >= MARK_ALPHA_SPEED) ch.markAlpha -= MARK_ALPHA_SPEED;
+    else ch.markAlpha = 0;
   }
 
-  if (mouse.left.wentUp) {
-    dragState = DragState.NONE;
-  }
-
-
-  if (dragState === DragState.LEFT) {
-    targetPreviewStart = (mouse.x - PREVIEW_PADDING_X) / previewWidth - dragOffsetPercent;
-    targetPreviewStart = Math.min(targetPreviewEnd - PREVIEW_MIN_DISTANCE, Math.max(0, targetPreviewStart));
-  } else if (dragState === DragState.RIGHT) {
-    targetPreviewEnd = (mouse.x - PREVIEW_PADDING_X) / previewWidth - dragOffsetPercent;
-    targetPreviewEnd = Math.min(1, Math.max(targetPreviewStart + PREVIEW_MIN_DISTANCE, targetPreviewEnd));
-  } else if (dragState === DragState.CENTER) {
-    const previewDist = targetPreviewEnd - targetPreviewStart;
-    let newP = (mouse.x - PREVIEW_PADDING_X) / previewWidth - dragOffsetPercent;
+  if (ch.dragState === DragState.LEFT) {
+    ch.targetPreviewStart = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ch.dragOffsetPercent;
+    ch.targetPreviewStart = Math.min(ch.targetPreviewEnd - PREVIEW_MIN_DISTANCE, Math.max(0, ch.targetPreviewStart));
+    setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
+  } else if (ch.dragState === DragState.RIGHT) {
+    ch.targetPreviewEnd = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ch.dragOffsetPercent;
+    ch.targetPreviewEnd = Math.min(1, Math.max(ch.targetPreviewStart + PREVIEW_MIN_DISTANCE, ch.targetPreviewEnd));
+    setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
+  } else if (ch.dragState === DragState.CENTER) {
+    const previewDist = ch.targetPreviewEnd - ch.targetPreviewStart;
+    let newP = (mouse.x - PREVIEW_PADDING_X) / previewWidth - ch.dragOffsetPercent;
     newP = Math.min(Math.max(previewDist * 0.5, newP), 1 - previewDist * 0.5);
 
-    targetPreviewStart = newP - previewDist * 0.5;
-    targetPreviewEnd = targetPreviewStart + previewDist;
+    ch.targetPreviewStart = newP - previewDist * 0.5;
+    ch.targetPreviewEnd = ch.targetPreviewStart + previewDist;
+    setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
   }
 
 
-  setFill(VIGNETTE_COLOR);
+  const BUTTON_Y = PREVIEW_Y + PREVIEW_HEIGHT + 30;
 
-  ctx.fillRect(
-    vignetteStartX,
-    PREVIEW_Y,
-    PREVIEW_VIGNETTE_WIDTH,
-    PREVIEW_HEIGHT,
-  );
-
-  ctx.fillRect(
-    vignetteEndX,
-    PREVIEW_Y,
-    PREVIEW_VIGNETTE_WIDTH,
-    PREVIEW_HEIGHT,
-  );
-
-  ctx.fillRect(
-    vignetteStartX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y,
-    vignetteEndX - vignetteStartX - PREVIEW_VIGNETTE_WIDTH,
-    PREVIEW_VIGNETTE_HEIGHT,
-  );
-
-  ctx.fillRect(
-    vignetteStartX + PREVIEW_VIGNETTE_WIDTH, PREVIEW_Y + PREVIEW_HEIGHT - PREVIEW_VIGNETTE_HEIGHT,
-    vignetteEndX - vignetteStartX - PREVIEW_VIGNETTE_WIDTH,
-    PREVIEW_VIGNETTE_HEIGHT,
-  );
-
-  endTimer('preview');
-
-
-
-  for (let lineIndex = 0; lineIndex < ch0.y.length; lineIndex++) {
-    setStroke(BUTTON_BORDER_COLOR);
-    const BUTTON_WIDTH = 175;
+  if (shouldRedraw(ch, RedrawablePart.BUTTONS)) {
+    md.clearRect(0, BUTTON_Y, middleCanvas.width, middleCanvas.height - BUTTON_Y);
+  }
+  for (let lineIndex = 0; lineIndex < ch.y.length; lineIndex++) {
+    const BUTTON_WIDTH = 125;
     const BUTTON_X = PREVIEW_PADDING_X + lineIndex * (BUTTON_WIDTH + 30);
-    const BUTTON_Y = PREVIEW_Y + PREVIEW_HEIGHT + 30;
-    const BUTTON_HEIGHT = 100;
-    const BUTTON_PADDING = 20;
+    const BUTTON_HEIGHT = 70;
+    const BUTTON_PADDING = 10;
     const CIRCLE_RADIUS = (BUTTON_HEIGHT - BUTTON_PADDING * 2) / 2;
     const CIRCLE_CENTER_X = BUTTON_X + CIRCLE_RADIUS + BUTTON_PADDING;
     const CIRCLE_CENTER_Y = BUTTON_Y + CIRCLE_RADIUS + BUTTON_PADDING;
 
-    ctx.beginPath();
-    ctx.lineWidth = 2;
-    roundedRect(BUTTON_X, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT, BUTTON_HEIGHT / 2);
-    ctx.stroke();
+    if (shouldRedraw(ch, RedrawablePart.BUTTONS)) {
+      setStroke(md, BUTTON_BORDER_COLOR);
 
-    ctx.beginPath();
-    ctx.arc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = ch0.color[lineIndex];
-    ctx.fill();
+      md.beginPath();
+      md.lineWidth = 2;
+      roundedRect(md, BUTTON_X, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT, BUTTON_HEIGHT / 2);
+      md.stroke();
 
-    ctx.save();
+      md.beginPath();
+      md.arc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, 0, Math.PI * 2);
+      md.fillStyle = ch.color[lineIndex];
+      md.fill();
 
-    const CHECK_SHORT_WIDTH = 20;
-    const CHECK_LONG_WIDTH = 35;
-    const CHECK_HEIGHT = 8;
-    const CHECK_CENTER_X = CIRCLE_CENTER_X - 5;
-    const CHECK_CENTER_Y = CIRCLE_CENTER_Y + 10;
+      md.save();
 
-    const WHITE_CIRCLE_DIFF = 4;
+      const CHECK_SHORT_WIDTH = 18;
+      const CHECK_LONG_WIDTH = 30;
+      const CHECK_HEIGHT = 8;
+      const CHECK_CENTER_X = CIRCLE_CENTER_X - 5;
+      const CHECK_CENTER_Y = CIRCLE_CENTER_Y + 10;
 
-    const buttonProgress = ch0.buttonProgress[lineIndex];
-    ctx.beginPath();
-    ctx.arc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, (CIRCLE_RADIUS - WHITE_CIRCLE_DIFF) * buttonProgress, 0, Math.PI * 2);
-    setFill(BACKGROUND_COLOR);
-    ctx.fill();
+      const WHITE_CIRCLE_DIFF = 4;
 
-    ctx.beginPath();
-    if (buttonProgress !== 1) {
-      ctx.translate(CHECK_CENTER_X, CHECK_CENTER_Y);
-      ctx.rotate(-Math.PI * 0.25);
-      roundedRect(-CHECK_HEIGHT * 0.5, -CHECK_HEIGHT * 0.5, CHECK_LONG_WIDTH * (1 - buttonProgress), CHECK_HEIGHT, CHECK_HEIGHT / 2);
+      const buttonProgress = ch.buttonProgress[lineIndex];
+      md.beginPath();
+      md.arc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, (CIRCLE_RADIUS - WHITE_CIRCLE_DIFF) * buttonProgress, 0, Math.PI * 2);
+      setFill(md, BACKGROUND_COLOR);
+      md.fill();
 
-      ctx.rotate(-Math.PI * 0.5);
-      roundedRect(-CHECK_HEIGHT * 0.5, -CHECK_HEIGHT * 0.5, CHECK_SHORT_WIDTH * (1 - buttonProgress), CHECK_HEIGHT, CHECK_HEIGHT / 2);
+      md.beginPath();
+      if (buttonProgress !== 1) {
+        md.translate(CHECK_CENTER_X, CHECK_CENTER_Y);
+        md.rotate(-Math.PI * 0.25);
+        roundedRect(md, -CHECK_HEIGHT * 0.5, -CHECK_HEIGHT * 0.5, CHECK_LONG_WIDTH * (1 - buttonProgress), CHECK_HEIGHT, CHECK_HEIGHT / 2);
+
+        md.rotate(-Math.PI * 0.5);
+        roundedRect(md, -CHECK_HEIGHT * 0.5, -CHECK_HEIGHT * 0.5, CHECK_SHORT_WIDTH * (1 - buttonProgress), CHECK_HEIGHT, CHECK_HEIGHT / 2);
+      }
+      md.fillStyle = '#fff';
+      md.fill();
+      md.restore();
+
+      const TEXT_PADDING_LEFT = 10;
+      setFill(md, BUTTON_TEXT_COLOR);
+      md.textBaseline = 'middle';
+      md.font = '27px Verdana, sans-serif'
+      md.fillText(ch.labels[lineIndex], CIRCLE_CENTER_X + CIRCLE_RADIUS + TEXT_PADDING_LEFT, BUTTON_Y + BUTTON_HEIGHT * 0.5);
+
+      let change = -0.1;
+      if (!ch.enabled[lineIndex]) {
+        change *= -1;
+      }
+      ch.buttonProgress[lineIndex] = constrain(ch.buttonProgress[lineIndex] + change, 0, 1);
     }
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    ctx.restore();
-
-    const TEXT_PADDING_LEFT = 15;
-    setFill(BUTTON_TEXT_COLOR);
-    ctx.textBaseline = 'middle';
-    ctx.font = '35px Verdana, sans-serif'
-    ctx.fillText(ch0.labels[lineIndex], CIRCLE_CENTER_X + CIRCLE_RADIUS + TEXT_PADDING_LEFT, BUTTON_Y + BUTTON_HEIGHT * 0.5);
 
     if (mouse.left.wentDown && pointInsideRect(
       mouse.x, mouse.y,
       BUTTON_X, BUTTON_Y, BUTTON_WIDTH, BUTTON_HEIGHT,
     )) {
-      ch0.enabled[lineIndex] = !ch0.enabled[lineIndex];
-    }
+      let enabledCount = 0;
+      for (let i = 0; i < ch.enabled.length; i++) {
+        if (ch.enabled[i]) {
+          enabledCount++;
+        }
+      }
 
-    let change = -0.1;
-    if (!ch0.enabled[lineIndex]) {
-      change *= -1;
+      if (enabledCount > 1 || !ch.enabled[lineIndex]) {
+        setAnimationTimer(ch, RedrawablePart.PREVIEW);
+        setAnimationTimer(ch, RedrawablePart.MAIN_CHART);
+        setAnimationTimer(ch, RedrawablePart.BUTTONS);
+        ch.enabled[lineIndex] = !ch.enabled[lineIndex];
+      }
     }
-    ch0.buttonProgress[lineIndex] = constrain(ch0.buttonProgress[lineIndex] + change, 0, 1);
   }
 
-
+  globalFrameIndex++;
   mouse.left.wentDown = false;
   mouse.left.wentUp = false;
 
-
-  globalFrameIndex++;
-  endTimer('loop');
-
-  requestAnimationFrame(loop);
+  requestAnimationFrame(() => loop(ch));
 }
 
-requestAnimationFrame(loop);
+
+let globalCharts: ChartData[] = [];
+
+for (let i = 0; i < 5; i++) {
+  const ch = loadChart(data, i);
+  globalCharts.push(ch);
+  requestAnimationFrame(() => loop(ch));
+}
